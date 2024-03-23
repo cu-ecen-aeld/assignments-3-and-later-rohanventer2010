@@ -15,6 +15,7 @@ int main(int argc, char *argv[])
     }
 
     openlog("writer", LOG_PID, LOG_USER);
+    setlogmask(LOG_UPTO(LOG_DEBUG));
 
     // open file for writing
     writefile = fopen(argv[1], "w");
