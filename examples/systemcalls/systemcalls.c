@@ -1,9 +1,18 @@
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <sys/wait.h>
 #include "systemcalls.h"
+
 
 /**
  * @param cmd the command to execute with system()
  * @return true if the command in @param cmd was executed
- *   successfully using the system() call, false if an error occurred,
+ *   successfully using the system() *call, false if an error occurred,
  *   either in invocation of the system() call, or if a non-zero return
  *   value was returned by the command issued in @param cmd.
 */
@@ -11,13 +20,13 @@ bool do_system(const char *cmd)
 {
 
 /*
- * TODO  add your code here
  *  Call the system() function with the command set in the cmd
  *   and return a boolean true if the system() call completed with success
  *   or false() if it returned a failure
 */
-
-    return true;
+    int ret;
+    ret = system(cmd);
+    return (ret == 0) ? true : false;
 }
 
 /**
@@ -44,24 +53,40 @@ bool do_exec(int count, ...)
     {
         command[i] = va_arg(args, char *);
     }
+
+    /* command list must be NULL terminated */
     command[count] = NULL;
-    // this line is to avoid a compile warning before your implementation is complete
-    // and may be removed
-    command[count] = command[count];
-
-/*
- * TODO:
- *   Execute a system command by calling fork, execv(),
- *   and wait instead of system (see LSP page 161).
- *   Use the command[0] as the full path to the command to execute
- *   (first argument to execv), and use the remaining arguments
- *   as second argument to the execv() command.
- *
-*/
-
     va_end(args);
+    /*
+    *   Execute a system command by calling fork, execv(),
+    *   and wait instead of system (see LSP page 161).
+    *   Use the command[0] as the full path to the command to execute
+    *   (first argument to execv), and use the remaining arguments
+    *   as second argument to the execv() command.
+    *
+    */
 
-    return true;
+    int status;
+    pid_t pid;
+    pid = fork();
+
+    if (pid == -1)
+        return false;
+    else if (pid == 0) 
+    {
+        execv (command[0], command); /* will only return on error */
+        exit(EXIT_FAILURE); /* exit child process with failure */
+    }
+
+    pid_t ret_pid;
+    ret_pid = waitpid (pid, &status, 0); /* pid_t waitpid(pid_t pid, int *stat_loc, int options) */
+    if (ret_pid == -1)
+        return false;
+    
+    /* pid == ret_pid ? 
+    * check exit status code
+    */
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
 /**
@@ -79,21 +104,46 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
     {
         command[i] = va_arg(args, char *);
     }
+    /* command list must be NULL terminated */
     command[count] = NULL;
-    // this line is to avoid a compile warning before your implementation is complete
-    // and may be removed
-    command[count] = command[count];
-
-
-/*
- * TODO
- *   Call execv, but first using https://stackoverflow.com/a/13784315/1446624 as a refernce,
- *   redirect standard out to a file specified by outputfile.
- *   The rest of the behaviour is same as do_exec()
- *
-*/
-
     va_end(args);
 
-    return true;
+    /*
+    *   Call execv, but first using https://stackoverflow.com/a/13784315/1446624 as a reference,
+    *   redirect standard out to a file specified by outputfile.
+    *   The rest of the behaviour is same as do_exec()
+    */
+
+    int fd;
+    /* should we add the O_CLOEXEC option, as the comment in the stackoverflow post suggested?*/
+    fd = open(outputfile, O_WRONLY|O_TRUNC|O_CREAT, 0644);
+
+    if (fd < 0) 
+        return false;
+
+    int status;
+    pid_t pid;
+    pid = fork();
+
+    if (pid == -1)
+        return false;
+    else if (pid == 0) 
+    {
+        if (dup2(fd, 1) < 0)
+            exit(EXIT_FAILURE); /* exit child process with failure */
+        close(fd);
+        execv (command[0], command); /* will only return on error */
+        exit(EXIT_FAILURE); /* exit child process with failure */
+    }
+
+    pid_t ret_pid;
+    ret_pid = waitpid (pid, &status, 0); /* pid_t waitpid(pid_t pid, int *stat_loc, int options) */
+    if (ret_pid == -1)
+        return false;
+    
+    /* pid == ret_pid ? 
+    * check exit status code
+    */
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+
 }
