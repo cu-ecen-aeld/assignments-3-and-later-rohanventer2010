@@ -12,8 +12,9 @@
 
 /* function prototypes */
 void signal_handler(int);
-void uint32_to_ip(uint32_t ip, char *ip_str);
+void uint32_to_ip(uint32_t, char *);
 void safe_shutdown(void);
+int find_chr_in_str(const char*, int, char);
 
 /* constants */
 const uint16_t DEFAULT_PORT = 9000;
@@ -28,11 +29,11 @@ int tempfile_fd = -1;
 /* program entry point */
 int main(int argc, char *argv[])
 {
-  int ret; /* generic return result */
+  int ret = -1; /* generic return result */
   bool daemon_flag = false;
   uint16_t socket_port = DEFAULT_PORT;  
 
-  int opt;
+  int opt = -1;
   while ((opt = getopt(argc, argv, "p:d")) != -1) {
     switch (opt) {
       case 'p':
@@ -60,6 +61,8 @@ int main(int argc, char *argv[])
   /* set up logging */
   openlog(base_name, LOG_PID, LOG_USER);
   setlogmask(LOG_UPTO(LOG_DEBUG));
+
+  remove(TEMP_FILE);
 
 
   //syslog(LOG_DEBUG, "Writing %s to %s", argv[2], argv[1]);
@@ -189,34 +192,70 @@ int main(int argc, char *argv[])
 
     /* get bytes from socket */
     char buffer[1024];
-    ssize_t bytes_received;
-    do
+    memset(buffer, 0, sizeof(buffer));
+    ssize_t bytes_received = -1;
+    while (1)
     {
-      /* ssize_t recv(int sockfd, void *buf, size_t len, int flags); 
-      * The recv() function returns the number of bytes received, or -1 if an error occurred
-      */
-      bytes_received = recv(accepted_fd, buffer, sizeof(buffer), 0);
-      if (bytes_received < 0)
+      while (1)
       {
+        /* loop recieving data and writing to file until we get a '\n' */
+
+        /* ssize_t recv(int sockfd, void *buf, size_t len, int flags); 
+        * The recv() function returns the number of bytes received, or -1 if an error occurred
+        */
+        bytes_received = recv(accepted_fd, buffer, sizeof(buffer), 0);
+        if (bytes_received < 0)
+        {
+          syslog(LOG_ERR, "Error ocurred recieving data");
+          safe_shutdown();
+          exit(EXIT_FAILURE);
+        }
+
+        if (bytes_received == 0)
+          break; /* connection closed by peer */
+
+        /* write data to the temp file and then close */
+        tempfile_fd = open(TEMP_FILE, O_CREAT | O_APPEND | O_WRONLY, 0666);
+        if (tempfile_fd < 0)
+        {
+          syslog(LOG_ERR, "Could not open temp file %s.", TEMP_FILE);
+          safe_shutdown();
+          exit(EXIT_FAILURE);
+        }
+
+        /* find position in '\n' if any*/
+        int pos = find_chr_in_str((const char *)buffer, bytes_received, '\n');
+        if (pos < 0)
+        {
+          /* '\n' was not found, write entire buffer */
+          ret = write(tempfile_fd, buffer, bytes_received);
+          if (ret < 0)
+          {
+            syslog(LOG_ERR, "Could not write to temp file %s.", TEMP_FILE);
+            safe_shutdown();
+            exit(EXIT_FAILURE);        
+          }
+          close(tempfile_fd);        
+        }
+        /* '\n' was found, write only upto returned position */
+        ret = write(tempfile_fd, buffer, pos+1);
+        if (ret < 0)
+        {
+          syslog(LOG_ERR, "Could not write to temp file %s.", TEMP_FILE);
+          safe_shutdown();
+          exit(EXIT_FAILURE);        
+        }
+        close(tempfile_fd);
+        break; 
+      }
+
+      if (bytes_received == 0)
+      {
+        syslog(LOG_INFO, "Closed connection from %s", ip_str);
+        close(accepted_fd);
         break;
       }
-
-
-      tempfile_fd = open(TEMP_FILE, O_CREAT | O_APPEND | O_WRONLY, 0666);
-      if (tempfile_fd < 0)
-      {
-        syslog(LOG_ERR, "Could not open temp file %s.", TEMP_FILE);
-        safe_shutdown();
-      }
-
-      /* write data to the temp file and then close */
-      ret = write(tempfile_fd, buffer, bytes_received);
-      close(tempfile_fd);
-
-      /* char *strchr(const char *str, int c) 
-      * This returns a pointer to the first occurrence of the character c in the string str, or NULL if the character is not found.
-      */
-      if (strchr(buffer, '\n') != NULL)
+      else
       {
         /* open the temp file again and read all data and send back to remote peer */
         tempfile_fd = open(TEMP_FILE, O_RDONLY);
@@ -224,21 +263,18 @@ int main(int argc, char *argv[])
         {
           syslog(LOG_ERR, "Could not open temp file %s.", TEMP_FILE);
           safe_shutdown();
-        }
+          exit(EXIT_FAILURE);
+        }   
 
-        ssize_t bytes_read;
-        while ((bytes_read = read(tempfile_fd, buffer, sizeof(buffer))) > 0)
+        char file_buffer[1024];
+        ssize_t bytes_read = 0;
+        while ((bytes_read = read(tempfile_fd, file_buffer, sizeof(file_buffer))) > 0)
         {
-          send(accepted_fd, buffer, bytes_read, 0);
+          send(accepted_fd, file_buffer, bytes_read, 0);
         }
-
         close(tempfile_fd);
       }
-    } while(bytes_received > 0);
-
-    syslog(LOG_INFO, "Closed connection from %s", ip_str);
-    close(accepted_fd);
-
+    }
   }
 
   return 0;
@@ -283,4 +319,17 @@ void safe_shutdown(void)
   */
   remove(TEMP_FILE);
   
+}
+
+int find_chr_in_str(const char *str, int str_len, char c)
+{
+  int ii;
+  for (ii = 0; ii < str_len; ii++)
+  {
+    char b = str[ii];
+    if ( b == c)
+      return ii;
+  }
+
+  return -1;
 }

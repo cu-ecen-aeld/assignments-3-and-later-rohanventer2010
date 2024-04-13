@@ -3,7 +3,7 @@ CC := gcc
 SRC = *.c
 OBJECT = $(SRC:.c=.o)
 TARGET = aesdsocket
-FLAGS = -Wall -Wextra -O2
+FLAGS = -Wall -Wextra -O2 -g
 
 # override CC variable
 ifdef CROSS_COMPILE
