@@ -25,6 +25,7 @@ bool gracefull_exit = false;
 int server_fd = -1;
 int accepted_fd = -1;
 int tempfile_fd = -1;
+char *big_buffer = NULL;
 
 /* program entry point */
 int main(int argc, char *argv[])
@@ -51,9 +52,6 @@ int main(int argc, char *argv[])
     }
   }
 
-
-
-
   /* get the program name, as it was called */
   char *base_name;
   base_name = basename(argv[0]);
@@ -64,9 +62,6 @@ int main(int argc, char *argv[])
 
   remove(TEMP_FILE);
 
-
-  //syslog(LOG_DEBUG, "Writing %s to %s", argv[2], argv[1]);
-
   /* Opens a stream socket bound to port 9000, failing and returning -1 if any of the socket connection steps fail.
   *
   * int socket(int domain, int type, int protocol);
@@ -75,7 +70,7 @@ int main(int argc, char *argv[])
   server_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (server_fd < 0) 
   {
-    syslog(LOG_ERR, "Socket could not be created.");
+    syslog(LOG_ERR, "Socket could not be created");
     safe_shutdown();
     exit(EXIT_FAILURE);
   }
@@ -88,11 +83,10 @@ int main(int argc, char *argv[])
   ret = setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &option_value, sizeof(option_value));
   if (ret < 0) 
   {
-    syslog(LOG_ERR, "Socket options could not be set.");
+    syslog(LOG_ERR, "Socket options could not be set");
     safe_shutdown();
     exit(EXIT_FAILURE);
   }
-
 
   struct sockaddr_in socket_address;
   socket_address.sin_family = AF_INET;
@@ -106,12 +100,11 @@ int main(int argc, char *argv[])
   ret = bind(server_fd, (struct sockaddr*)&socket_address, sizeof(socket_address));
   if (ret < 0) 
   {
-    syslog(LOG_ERR, "Socket could bind to address/port.");
+    syslog(LOG_ERR, "Socket could bind to address/port");
     safe_shutdown();
     exit(EXIT_FAILURE);
   }
 
-  // Listens for and accepts a connection
   /*
   * int listen(int sockfd, int backlog);
   * On success, zero is returned.  On error, -1 is returned
@@ -119,7 +112,7 @@ int main(int argc, char *argv[])
   ret = listen(server_fd, 10);
   if (ret < 0)
   {
-    syslog(LOG_ERR, "Socket could not listen.");
+    syslog(LOG_ERR, "Socket could not listen");
     safe_shutdown();
     exit(EXIT_FAILURE);
   }
@@ -181,14 +174,14 @@ int main(int argc, char *argv[])
     accepted_fd = accept(server_fd, (struct sockaddr*)&socket_address, &addrlen);
     if (accepted_fd < 0)
     {
-      syslog(LOG_ERR, "Socket could not accept.");
+      syslog(LOG_ERR, "Socket could not accept");
       exit(EXIT_FAILURE);
     }
 
     char ip_str[16];
     struct in_addr sin_addr = socket_address.sin_addr;
     uint32_to_ip(sin_addr.s_addr, ip_str);
-    syslog(LOG_DEBUG, "Accepted connection from %s.", ip_str); 
+    syslog(LOG_DEBUG, "Accepted connection from %s", ip_str); 
 
     /* get bytes from socket */
     char buffer[1024];
@@ -218,7 +211,7 @@ int main(int argc, char *argv[])
         tempfile_fd = open(TEMP_FILE, O_CREAT | O_APPEND | O_WRONLY, 0666);
         if (tempfile_fd < 0)
         {
-          syslog(LOG_ERR, "Could not open temp file %s.", TEMP_FILE);
+          syslog(LOG_ERR, "Could not open temp file %s", TEMP_FILE);
           safe_shutdown();
           exit(EXIT_FAILURE);
         }
@@ -231,23 +224,26 @@ int main(int argc, char *argv[])
           ret = write(tempfile_fd, buffer, bytes_received);
           if (ret < 0)
           {
-            syslog(LOG_ERR, "Could not write to temp file %s.", TEMP_FILE);
+            syslog(LOG_ERR, "Could not write to temp file %s, '\\n' was not found", TEMP_FILE);
             safe_shutdown();
             exit(EXIT_FAILURE);        
           }
           close(tempfile_fd);        
         }
-        /* '\n' was found, write only upto returned position */
-        ret = write(tempfile_fd, buffer, pos+1);
-        if (ret < 0)
+        else
         {
-          syslog(LOG_ERR, "Could not write to temp file %s.", TEMP_FILE);
-          safe_shutdown();
-          exit(EXIT_FAILURE);        
+          /* '\n' was found, write only upto returned position */
+          ret = write(tempfile_fd, buffer, pos+1);
+          if (ret < 0)
+          {
+            syslog(LOG_ERR, "Could not write to temp file %s, '\\n' was found", TEMP_FILE);
+            safe_shutdown();
+            exit(EXIT_FAILURE);        
+          }
+          close(tempfile_fd);
+          break; 
         }
-        close(tempfile_fd);
-        break; 
-      }
+      } /* recv */
 
       if (bytes_received == 0)
       {
@@ -261,7 +257,7 @@ int main(int argc, char *argv[])
         tempfile_fd = open(TEMP_FILE, O_RDONLY);
         if (tempfile_fd < 0)
         {
-          syslog(LOG_ERR, "Could not open temp file %s.", TEMP_FILE);
+          syslog(LOG_ERR, "Could not open temp file %s", TEMP_FILE);
           safe_shutdown();
           exit(EXIT_FAILURE);
         }   
@@ -273,10 +269,11 @@ int main(int argc, char *argv[])
           send(accepted_fd, file_buffer, bytes_read, 0);
         }
         close(tempfile_fd);
-      }
-    }
-  }
+      } /* if bytes_received == 0*/
+    } /* recv, write and send */
+  } /* accept */
 
+  printf("exit normally - should never get here\n");
   return 0;
 }
 
