@@ -1,31 +1,53 @@
+
 #include <stdio.h>
 #include <stdlib.h>
-#include <syslog.h>
+#include <unistd.h>
 #include <signal.h>
+//#include <siginfo.h>
+#include <time.h>
+#include <syslog.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <unistd.h>
 #include <stdbool.h>
 #include <libgen.h>
 #include <fcntl.h>
+#include <getopt.h>
+#include <pthread.h>
+
+#include "threading.h"
+#include "queue.h"
 
 /* function prototypes */
 void signal_handler(int);
 void uint32_to_ip(uint32_t, char *);
 void safe_shutdown(void);
 int find_chr_in_str(const char*, int, char);
+void* socket_thread_func(void*);
+void* timer_thread_func(void*);
+
+/* Forward declaration of struct sigevent */
+struct sigevent;
 
 /* constants */
 const uint16_t DEFAULT_PORT = 9000;
 const char *TEMP_FILE = "/var/tmp/aesdsocketdata\0";
 
+/* structs */
+struct thread_entry
+{
+  pthread_t thread_id;
+  struct socket_thread_data *thread_data;
+  SLIST_ENTRY(thread_entry) threads;
+};
+
 /* globals */
-bool gracefull_exit = false;
 int server_fd = -1;
-int accepted_fd = -1;
-int tempfile_fd = -1;
-char *big_buffer = NULL;
+struct thread_entry *thread_list_entry = NULL;
+struct slisthead head;
+pthread_t timer_thread_id = -1;
+
+SLIST_HEAD(slisthead, thread_entry);
 
 /* program entry point */
 int main(int argc, char *argv[])
@@ -61,6 +83,17 @@ int main(int argc, char *argv[])
   setlogmask(LOG_UPTO(LOG_DEBUG));
 
   remove(TEMP_FILE);
+
+
+  /* inititialize mutex */
+  pthread_mutex_t mutex;
+  ret = pthread_mutex_init(&mutex, NULL);
+  if (ret != 0) 
+  {
+    syslog(LOG_ERR, "Mutex cannot be initialized");
+    exit(EXIT_FAILURE);
+  }
+  //TODO: mutex_destroy
 
   /* Opens a stream socket bound to port 9000, failing and returning -1 if any of the socket connection steps fail.
   *
@@ -163,18 +196,37 @@ int main(int argc, char *argv[])
     close(STDERR_FILENO);
   }
 
+
+  
+  SLIST_INIT(&head);
+
+  /* setup timer thread */ 
+  struct timer_thread_data timer_thread_func_args;
+  timer_thread_func_args.mutex = &mutex;
+
+  ret = pthread_create(&timer_thread_id, NULL, timer_thread_func, &timer_thread_func_args);
+  if(ret != 0)
+  {
+    syslog(LOG_ERR, "Error creating thread");
+    safe_shutdown();
+    exit(EXIT_FAILURE);
+  }
+
+
+  printf("Listening for connections on port %d...\n", socket_port);
   while (1)
   {
     /* int accept(int sockfd, struct sockaddr *_Nullable restrict addr, socklen_t *_Nullable restrict addrlen);
     * On success, these system calls return a file descriptor for the
     *   accepted socket (a nonnegative integer).  On error, -1 is returned
     */
-    printf("Listening for connections on port %d...\n", socket_port);
+    
     socklen_t addrlen = sizeof(socket_address);
-    accepted_fd = accept(server_fd, (struct sockaddr*)&socket_address, &addrlen);
+    int accepted_fd = accept(server_fd, (struct sockaddr*)&socket_address, &addrlen);
     if (accepted_fd < 0)
     {
       syslog(LOG_ERR, "Socket could not accept");
+      //TODO: better exit routine?
       exit(EXIT_FAILURE);
     }
 
@@ -182,95 +234,58 @@ int main(int argc, char *argv[])
     struct in_addr sin_addr = socket_address.sin_addr;
     uint32_to_ip(sin_addr.s_addr, ip_str);
     syslog(LOG_DEBUG, "Accepted connection from %s", ip_str); 
-
-    /* get bytes from socket */
-    char buffer[1024];
-    memset(buffer, 0, sizeof(buffer));
-    ssize_t bytes_received = -1;
-    while (1)
+    printf("Accepted connection from %s\n", ip_str); 
+    
+    /* the threading stuff */
+    thread_list_entry = NULL;
+    thread_list_entry = malloc(sizeof(struct thread_entry));
+    if (thread_list_entry != NULL)
     {
-      while (1)
+      // error out because malloc failed
+      //TODO: safe shutdown
+    }    
+
+    /* setup data structure */
+    struct socket_thread_data *thread_func_args = malloc(sizeof(struct socket_thread_data));
+    if (thread_func_args != NULL)
+    {
+      // error out because malloc failed
+      //TODO: safe shutdown
+    }
+    thread_func_args->mutex = &mutex;
+    thread_func_args->accepted_fd = accepted_fd;
+    thread_func_args->thread_completed = false;
+    thread_func_args->thread_generated_error = false;
+    strncpy(thread_func_args->ip_str, ip_str, 16);
+
+    thread_list_entry->thread_data = thread_func_args;
+
+    ret = pthread_create(&(thread_list_entry->thread_id), NULL, socket_thread_func, thread_func_args);
+    if(ret != 0)
+    {
+      syslog(LOG_ERR, "Error creating thread");
+      free(thread_list_entry->thread_data);
+      free(thread_list_entry);
+      safe_shutdown();
+      exit(EXIT_FAILURE);
+    }
+
+    SLIST_INSERT_HEAD(&head, thread_list_entry, threads);
+    
+    thread_list_entry = NULL;
+    struct thread_entry *thead_entry_temp = NULL;
+    SLIST_FOREACH_SAFE(thread_list_entry, &head, threads, thead_entry_temp)
+    {
+      if (thread_list_entry->thread_data->thread_completed)
       {
-        /* loop recieving data and writing to file until we get a '\n' */
-
-        /* ssize_t recv(int sockfd, void *buf, size_t len, int flags); 
-        * The recv() function returns the number of bytes received, or -1 if an error occurred
-        */
-        bytes_received = recv(accepted_fd, buffer, sizeof(buffer), 0);
-        if (bytes_received < 0)
-        {
-          syslog(LOG_ERR, "Error ocurred recieving data");
-          safe_shutdown();
-          exit(EXIT_FAILURE);
-        }
-
-        if (bytes_received == 0)
-          break; /* connection closed by peer */
-
-        /* write data to the temp file and then close */
-        tempfile_fd = open(TEMP_FILE, O_CREAT | O_APPEND | O_WRONLY, 0666);
-        if (tempfile_fd < 0)
-        {
-          syslog(LOG_ERR, "Could not open temp file %s", TEMP_FILE);
-          safe_shutdown();
-          exit(EXIT_FAILURE);
-        }
-
-        /* find position in '\n' if any*/
-        int pos = find_chr_in_str((const char *)buffer, bytes_received, '\n');
-        if (pos < 0)
-        {
-          /* '\n' was not found, write entire buffer */
-          ret = write(tempfile_fd, buffer, bytes_received);
-          if (ret < 0)
-          {
-            syslog(LOG_ERR, "Could not write to temp file %s, '\\n' was not found", TEMP_FILE);
-            safe_shutdown();
-            exit(EXIT_FAILURE);        
-          }
-          close(tempfile_fd);        
-        }
-        else
-        {
-          /* '\n' was found, write only upto returned position */
-          ret = write(tempfile_fd, buffer, pos+1);
-          if (ret < 0)
-          {
-            syslog(LOG_ERR, "Could not write to temp file %s, '\\n' was found", TEMP_FILE);
-            safe_shutdown();
-            exit(EXIT_FAILURE);        
-          }
-          close(tempfile_fd);
-          break; 
-        }
-      } /* recv */
-
-      if (bytes_received == 0)
-      {
-        syslog(LOG_INFO, "Closed connection from %s", ip_str);
-        close(accepted_fd);
-        break;
+        pthread_join(thread_list_entry->thread_id, NULL);
+        SLIST_REMOVE(&head, thread_list_entry, thread_entry, threads);
+        free(thread_list_entry->thread_data);
+        free(thread_list_entry); 
       }
-      else
-      {
-        /* open the temp file again and read all data and send back to remote peer */
-        tempfile_fd = open(TEMP_FILE, O_RDONLY);
-        if (tempfile_fd < 0)
-        {
-          syslog(LOG_ERR, "Could not open temp file %s", TEMP_FILE);
-          safe_shutdown();
-          exit(EXIT_FAILURE);
-        }   
+    }
+    free(thead_entry_temp); // this?
 
-        char file_buffer[1024];
-        ssize_t bytes_read = 0;
-        while ((bytes_read = read(tempfile_fd, file_buffer, sizeof(file_buffer))) > 0)
-        {
-          send(accepted_fd, file_buffer, bytes_read, 0);
-        }
-        close(tempfile_fd);
-      } /* if bytes_received == 0*/
-    } /* recv, write and send */
   } /* accept */
 
   printf("exit normally - should never get here\n");
@@ -300,14 +315,28 @@ void signal_handler(int signum)
 
 void safe_shutdown(void)
 {
-  if (accepted_fd >= 0)
-    close(accepted_fd);
+  //if (accepted_fd >= 0)
+  //  close(accepted_fd);
+  struct thread_entry *n1 = NULL;
 
   if (server_fd >= 0)
     close(server_fd);
 
-  if (tempfile_fd >= 0)
-    close(tempfile_fd);    
+  pthread_cancel(timer_thread_id);
+  pthread_join(timer_thread_id, NULL);
+
+  while (!SLIST_EMPTY(&head)) {           /* List Deletion. */
+    n1 = SLIST_FIRST(&head);
+    pthread_cancel(n1->thread_id);
+    pthread_join(n1->thread_id, NULL);
+    SLIST_REMOVE_HEAD(&head, threads);
+    free(n1->thread_data);
+    free(n1);
+  }
+
+
+  //if (tempfile_fd >= 0)
+  //  close(tempfile_fd);    
 
   /* int remove(const char *filename) 
   * On success, zero is returned. On error, -1 is returned
@@ -324,9 +353,202 @@ int find_chr_in_str(const char *str, int str_len, char c)
   for (ii = 0; ii < str_len; ii++)
   {
     char b = str[ii];
-    if ( b == c)
+    if (b == c)
       return ii;
   }
 
   return -1;
 }
+
+void* socket_thread_func(void* thread_param)
+{
+  char recv_buffer[1024];
+  //memset(buffer, 0, sizeof(buffer));
+  ssize_t bytes_received = -1;
+  int tempfile_fd = -1;
+
+  struct socket_thread_data* thread_func_args = (struct socket_thread_data *) thread_param;
+
+  pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+
+  while(1)
+  {
+    while (1)
+    {
+      bytes_received = recv(thread_func_args->accepted_fd, recv_buffer, sizeof(recv_buffer), 0);
+      if (bytes_received < 0)
+      {
+        syslog(LOG_ERR, "Error ocurred recieving data");
+        if (thread_func_args->accepted_fd >= 0)
+          close(thread_func_args->accepted_fd);      
+        thread_func_args->thread_completed = true;
+        thread_func_args->thread_generated_error = true;
+        return thread_param;
+      }
+
+      if (bytes_received == 0)
+        break; /* connection closed by peer */
+
+      int ret;
+      ret = pthread_mutex_lock(thread_func_args->mutex);
+      if (ret != 0)
+      {
+        syslog(LOG_ERR, "Error acquiring mutex");
+        if (thread_func_args->accepted_fd >= 0)
+          close(thread_func_args->accepted_fd);      
+        thread_func_args->thread_completed = true;
+        thread_func_args->thread_generated_error = true;    
+        return thread_param;
+      }
+
+      /* write data to the temp file and then close */
+      tempfile_fd = open(TEMP_FILE, O_CREAT | O_APPEND | O_WRONLY, 0666);
+      if (tempfile_fd < 0)
+      {
+        syslog(LOG_ERR, "Could not open temp file %s", TEMP_FILE);
+        if (thread_func_args->accepted_fd >= 0)
+          close(thread_func_args->accepted_fd);      
+        thread_func_args->thread_completed = true;
+        thread_func_args->thread_generated_error = true;
+        pthread_mutex_unlock(thread_func_args->mutex);
+        return thread_param;
+      }
+
+      /* find position in '\n' if any*/
+      int pos = find_chr_in_str((const char *)recv_buffer, bytes_received, '\n');
+      if (pos < 0)
+      {
+        /* '\n' was not found, write entire buffer */
+        ret = write(tempfile_fd, recv_buffer, bytes_received);
+        if (ret < 0)
+        {
+          syslog(LOG_ERR, "Could not write to temp file %s, '\\n' was not found", TEMP_FILE);
+          if (thread_func_args->accepted_fd >= 0)
+            close(thread_func_args->accepted_fd);        
+          thread_func_args->thread_completed = true;
+          thread_func_args->thread_generated_error = true;
+          pthread_mutex_unlock(thread_func_args->mutex);      
+          return thread_param;
+        }
+        close(tempfile_fd);        
+      }
+      else
+      {
+        /* '\n' was found, write only upto returned position */
+        ret = write(tempfile_fd, recv_buffer, pos+1);
+        if (ret < 0)
+        {
+          syslog(LOG_ERR, "Could not write to temp file %s, '\\n' was found", TEMP_FILE);
+          if (thread_func_args->accepted_fd >= 0)
+            close(thread_func_args->accepted_fd);        
+          thread_func_args->thread_completed = true;
+          thread_func_args->thread_generated_error = true;
+          pthread_mutex_unlock(thread_func_args->mutex);
+          return thread_param;
+        }
+        close(tempfile_fd);
+        break; 
+      }
+    }
+
+    if (bytes_received == 0)
+    {
+      syslog(LOG_INFO, "Closed connection from %s", thread_func_args->ip_str);
+      printf("Closed connection from %s\n", thread_func_args->ip_str);
+      if (thread_func_args->accepted_fd >= 0)
+        close(thread_func_args->accepted_fd);
+      thread_func_args->thread_completed = true;
+      thread_func_args->thread_generated_error = false;
+      pthread_mutex_unlock(thread_func_args->mutex);
+      return thread_param;
+    }
+    else
+    {
+      /* open the temp file again and read all data and send back to remote peer */
+      tempfile_fd = open(TEMP_FILE, O_RDONLY);
+      if (tempfile_fd < 0)
+      {
+        syslog(LOG_ERR, "Could not open temp file %s", TEMP_FILE);
+        if (thread_func_args->accepted_fd >= 0)
+          close(thread_func_args->accepted_fd);
+        thread_func_args->thread_completed = true;
+        thread_func_args->thread_generated_error = true;
+        pthread_mutex_unlock(thread_func_args->mutex);
+        return thread_param;
+      }   
+
+      char file_buffer[1024];
+      ssize_t bytes_read = 0;
+      while ((bytes_read = read(tempfile_fd, file_buffer, sizeof(file_buffer))) > 0)
+      {
+        send(thread_func_args->accepted_fd, file_buffer, bytes_read, 0);
+      }
+      close(tempfile_fd);
+      pthread_mutex_unlock(thread_func_args->mutex);
+    } /* if bytes_received == 0*/
+  }
+
+  if (thread_func_args->accepted_fd >= 0)
+    close(thread_func_args->accepted_fd);
+
+  thread_func_args->thread_completed = true;
+  thread_func_args->thread_generated_error = false;
+  pthread_mutex_unlock(thread_func_args->mutex);
+  return thread_param;
+}
+
+void* timer_thread_func(void* thread_param)
+{
+  int timer_count = 0;
+  int tempfile_fd = -1;
+  int ret = -1;
+  struct timer_thread_data* thread_func_args = (struct timer_thread_data *) thread_param;
+
+  pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+  
+  while(1)
+  {
+    if (timer_count < 10)
+    {
+      timer_count++;
+      usleep(1000000);
+    }
+    else
+    {
+      timer_count = 0;
+      ret = pthread_mutex_lock(thread_func_args->mutex);
+      if (ret != 0)
+      {
+        syslog(LOG_ERR, "Error acquiring mutex");     
+        return thread_param;
+      }
+
+      tempfile_fd = open(TEMP_FILE, O_CREAT | O_APPEND | O_WRONLY, 0666);
+      if (tempfile_fd < 0)
+      {
+        syslog(LOG_ERR, "Could not open temp file %s", TEMP_FILE);     
+        pthread_mutex_unlock(thread_func_args->mutex);
+        return thread_param;
+      }
+
+      time_t t = time(NULL);
+      char time_str[50];
+      // year, month, day, hour (in 24 hour format) minute and second
+      strftime(time_str, 100, "timestamp:%Y, %m, %d, %H, %M, %S\n", localtime(&t));
+      ret = write(tempfile_fd, time_str, strlen(time_str));
+      if (ret < 0)
+      {
+        syslog(LOG_ERR, "Could not write to temp file %s.", TEMP_FILE);
+        if (tempfile_fd >= 0)
+          close(tempfile_fd);
+        pthread_mutex_unlock(thread_func_args->mutex);
+        return thread_param;
+      }
+      close(tempfile_fd);
+      pthread_mutex_unlock(thread_func_args->mutex);
+    }
+
+  }
+
+}
+
