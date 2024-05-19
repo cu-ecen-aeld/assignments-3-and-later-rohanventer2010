@@ -31,7 +31,13 @@ struct sigevent;
 
 /* constants */
 const uint16_t DEFAULT_PORT = 9000;
-const char *TEMP_FILE = "/var/tmp/aesdsocketdata\0";
+//const char *TEMP_FILE = "/var/tmp/aesdsocketdata";
+
+#ifdef USE_AESD_CHAR_DEVICE
+#define TEMP_FILE "/dev/aesdchar"
+#else
+#define TEMP_FILE "/var/tmp/aesdsocketdata"
+#endif
 
 /* structs */
 struct thread_entry
@@ -82,7 +88,9 @@ int main(int argc, char *argv[])
   openlog(base_name, LOG_PID, LOG_USER);
   setlogmask(LOG_UPTO(LOG_DEBUG));
 
+#ifndef USE_AESD_CHAR_DEVICE
   remove(TEMP_FILE);
+#endif
 
 
   /* inititialize mutex */
@@ -199,7 +207,7 @@ int main(int argc, char *argv[])
 
   
   SLIST_INIT(&head);
-
+#ifndef USE_AESD_CHAR_DEVICE
   /* setup timer thread */ 
   struct timer_thread_data timer_thread_func_args;
   timer_thread_func_args.mutex = &mutex;
@@ -211,7 +219,7 @@ int main(int argc, char *argv[])
     safe_shutdown();
     exit(EXIT_FAILURE);
   }
-
+#endif
 
   printf("Listening for connections on port %d...\n", socket_port);
   while (1)
@@ -343,7 +351,9 @@ void safe_shutdown(void)
   *
   * we dont really care if error ocurred here?
   */
+#ifndef USE_AESD_CHAR_DEVICE
   remove(TEMP_FILE);
+#endif
   
 }
 

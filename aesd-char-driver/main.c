@@ -17,11 +17,14 @@
 #include <linux/types.h>
 #include <linux/cdev.h>
 #include <linux/fs.h> // file_operations
+#include <linux/slab.h> // For kmalloc()
+#include <linux/uaccess.h> // For copy_from_user()
+
 #include "aesdchar.h"
 int aesd_major =   0; // use dynamic major
 int aesd_minor =   0;
 
-MODULE_AUTHOR("Your Name Here"); /** TODO: fill in your name **/
+MODULE_AUTHOR("rohanventer2010"); 
 MODULE_LICENSE("Dual BSD/GPL");
 
 struct aesd_dev aesd_device;
@@ -29,42 +32,264 @@ struct aesd_dev aesd_device;
 int aesd_open(struct inode *inode, struct file *filp)
 {
     PDEBUG("open");
-    /**
-     * TODO: handle open
-     */
+
+	struct aesd_dev *dev; /* device information */
+
+	dev = container_of(inode->i_cdev, struct aesd_dev, cdev);
+	filp->private_data = dev; /* for other methods */
+
     return 0;
 }
+
 
 int aesd_release(struct inode *inode, struct file *filp)
 {
     PDEBUG("release");
-    /**
-     * TODO: handle release
-     */
     return 0;
 }
 
-ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
-                loff_t *f_pos)
+
+ssize_t aesd_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos)
 {
     ssize_t retval = 0;
-    PDEBUG("read %zu bytes with offset %lld",count,*f_pos);
-    /**
-     * TODO: handle read
+
+    PDEBUG("read %zu bytes with offset %lld", count, *f_pos);
+
+    /* make sure arguments are valid 
+     * return EFAULT (Bad address)
      */
+    if (!filp || !buf || !f_pos)
+        return -EFAULT;
+
+    struct aesd_dev *dev;
+    dev = (struct aesd_dev*) filp->private_data;        
+
+    if(mutex_lock_interruptible(&dev->lock))
+        return -ERESTARTSYS; /* return ERESTARTSYS (Interrupted system call should be restarted) */
+
+    struct aesd_buffer_entry *entry = NULL;
+    struct aesd_circular_buffer *buffer = &dev->buffer;
+    size_t offset = 0;
+    do {
+        entry = aesd_circular_buffer_find_entry_offset_for_fpos(buffer, *f_pos, &offset);
+        if (entry == NULL || retval >= count) 
+            break;
+
+        size_t bytes_to_copy = entry->size - offset;
+        if (bytes_to_copy + retval > count)
+            bytes_to_copy = count - retval;
+
+        size_t copied_bytes = copy_to_user(buf + retval, entry->buffptr + offset, bytes_to_copy);
+        if (copied_bytes != 0) 
+        {
+            mutex_unlock(&dev->lock);
+            return -EFAULT;
+        } else 
+        {
+            retval += bytes_to_copy;
+            *f_pos += bytes_to_copy;
+        }
+    } while (retval < count);
+
+    mutex_unlock(&dev->lock);
     return retval;
 }
 
-ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
-                loff_t *f_pos)
+
+ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff_t *f_pos)
 {
-    ssize_t retval = -ENOMEM;
-    PDEBUG("write %zu bytes with offset %lld",count,*f_pos);
-    /**
-     * TODO: handle write
+    ssize_t retval = count;
+    PDEBUG("write %zu bytes with offset %lld", count, *f_pos);
+
+    /* make sure arguments are valid 
+     * return EFAULT (Bad address)
+     * we ignore f_pos
      */
-    return retval;
+    if (!filp || !buf)
+        return -EFAULT;
+
+    /* return 0 when attempting to write zero */
+    if (count == 0)
+        return 0;
+
+    struct aesd_dev *dev;
+    dev = (struct aesd_dev*) filp->private_data;        
+
+    if(mutex_lock_interruptible(&dev->lock))
+        return -ERESTARTSYS; /* return ERESTARTSYS (Interrupted system call should be restarted) */
+
+    // first look at the buf from user
+    char *temp_buffer;
+    temp_buffer = kmalloc(count * sizeof(char), GFP_KERNEL);
+    if (!temp_buffer)
+    {
+        mutex_unlock(&dev->lock);
+        return -ENOMEM;
+    }   
+
+    /* unsigned long copy_from_user (void * to, const void __user * from, unsigned long n);
+     * Returns number of bytes that could not be copied. On success, this will be zero. 
+     * If some data could not be copied, this function will pad the copied data to the requested size using zero bytes. */
+    size_t copied_bytes = -1;
+    copied_bytes = copy_from_user((void *)temp_buffer,(const void *)buf, count);
+    if (copied_bytes != 0)
+    {
+        /* unable to copy from user space */
+        kfree(temp_buffer); /* cleaup */
+        mutex_unlock(&dev->lock);
+        return -EFAULT;
+    }
+    
+    copied_bytes = count;
+    /* find last non-zero byte, this will be the true length */
+    size_t ii = 0;
+    for (ii = copied_bytes-1; ii >= 0; ii--)
+    {
+        if (temp_buffer[ii] != '\0')
+        {
+            copied_bytes = (ii + 1);
+            break;
+        }
+    }
+    
+    /* is the last char a new line */
+    bool last_line_complete = false;
+    if (temp_buffer[copied_bytes-1] == '\n')
+        last_line_complete = true;
+    
+    /* lets count the number of lines */
+    size_t line_count = 0;
+    for (ii = 0; ii < copied_bytes; ii++)
+    {
+        if (temp_buffer[ii] == '\n')
+            line_count++;
+    }
+
+    /* adjust the line count if the last line does not end with a newline */
+    if (!last_line_complete)
+        line_count++;
+
+    PDEBUG("Number of lines: %d", line_count);
+    PDEBUG("Last line complete: %s", last_line_complete ? "true" : "false");
+
+    /* extract each line from the temp_buffer and create a new entry */
+    const char *ptr = temp_buffer;
+    const char *start_ptr = ptr;
+    for (ii = 0; ii < line_count; ii++)
+    {
+        // get line start ptr and length
+        const char *start_ptr = ptr;
+        size_t line_length = 0; 
+        if (ii != (line_count-1)) /* last line? */
+        {
+            while (*ptr != '\n')
+            {
+                ptr++;
+                line_length++;
+            }
+            ptr++; /* skip the '\n' */
+            line_length++; /* we have to include the '\n' */
+        }
+        else
+        {
+            if (last_line_complete)
+            {
+                while (*ptr != '\n')
+                {
+                    ptr++;
+                    line_length++;
+                }
+                ptr++; /* skip the '\n' */ 
+                line_length++; /* we have to include the '\n' */                  
+            }
+            else
+                line_length = (&temp_buffer[copied_bytes-1] - start_ptr + 1); /* calculate line length */
+        }
+
+        PDEBUG("Line %d: line length: %d", ii, line_length);
+
+        struct aesd_buffer_entry *entry = &dev->entry;
+        if(!entry->buffptr)
+        {
+            /* this is a new entry */
+            entry->buffptr = kmalloc(line_length, GFP_KERNEL);
+            if (!entry->buffptr)
+            {
+                kfree(temp_buffer);
+                mutex_unlock(&dev->lock);
+                return -ENOMEM;
+            }
+
+            memcpy((void *)entry->buffptr, (void *)start_ptr, line_length);
+            entry->size = line_length;
+
+            /* add entry to circular buffer */
+            struct aesd_circular_buffer *buffer = &dev->buffer;
+            if (ii == (line_count-1)) /* last line? */
+            {
+                if (last_line_complete)
+                {
+                    struct aesd_buffer_entry *old_entry = aesd_circular_buffer_add_entry(buffer, entry);
+                    if (!old_entry)
+                        kfree(old_entry->buffptr);
+                    entry->buffptr = NULL;
+                    entry->size = 0;
+                }
+            }
+        }
+        else
+        {
+            /* complete a previous entry */
+            char *tmp = kmalloc(line_length + entry->size, GFP_KERNEL);
+            if (!tmp)
+            {
+                kfree(temp_buffer);
+                mutex_unlock(&dev->lock);
+                return -ENOMEM;
+            }
+
+            memcpy((void *)tmp, (void *)entry->buffptr, entry->size);
+            memcpy((void *)tmp + entry->size, (void *)start_ptr, line_length);
+
+            kfree(entry->buffptr); /* free the old entry buffer */
+            entry->buffptr = tmp;
+            entry->size += line_length;
+
+            /* add entry to circular buffer */
+            struct aesd_circular_buffer *buffer = &dev->buffer;
+            if (ii == (line_count-1)) /* last line? */
+            {
+                if (last_line_complete)
+                {
+                    struct aesd_buffer_entry *old_entry = aesd_circular_buffer_add_entry(buffer, entry);
+                    if (!old_entry)
+                        kfree(old_entry->buffptr);
+                    entry->buffptr = NULL;
+                    entry->size = 0;
+                }
+            }   
+        }
+    }
+
+    uint8_t index;
+    struct aesd_circular_buffer *buffer_ = &dev->buffer;
+    struct aesd_buffer_entry *entry_;
+    PDEBUG("======");
+    AESD_CIRCULAR_BUFFER_FOREACH(entry_,buffer_,index) {
+        char new_string[entry_->size+1];
+        memcpy(new_string, entry_->buffptr, entry_->size);
+        new_string[entry_->size] = '\0'; //properly null terminate
+        PDEBUG("%d : %s : %d", index, new_string, entry_->size);
+    }
+    PDEBUG("======");
+
+
+    kfree(temp_buffer);
+    mutex_unlock(&dev->lock);
+    return retval; /* return number of bytes written */
 }
+
+
 struct file_operations aesd_fops = {
     .owner =    THIS_MODULE,
     .read =     aesd_read,
@@ -73,47 +298,48 @@ struct file_operations aesd_fops = {
     .release =  aesd_release,
 };
 
+
 static int aesd_setup_cdev(struct aesd_dev *dev)
 {
+    PDEBUG("aesd_setup_cdev");
     int err, devno = MKDEV(aesd_major, aesd_minor);
 
     cdev_init(&dev->cdev, &aesd_fops);
     dev->cdev.owner = THIS_MODULE;
     dev->cdev.ops = &aesd_fops;
     err = cdev_add (&dev->cdev, devno, 1);
-    if (err) {
+    if (err)
         printk(KERN_ERR "Error %d adding aesd cdev", err);
-    }
     return err;
 }
 
 
-
 int aesd_init_module(void)
 {
+    PDEBUG("aesd_init_module");
     dev_t dev = 0;
     int result;
-    result = alloc_chrdev_region(&dev, aesd_minor, 1,
-            "aesdchar");
+    result = alloc_chrdev_region(&dev, aesd_minor, 1, "aesdchar");
     aesd_major = MAJOR(dev);
-    if (result < 0) {
+    if (result < 0) 
+    {
         printk(KERN_WARNING "Can't get major %d\n", aesd_major);
         return result;
     }
     memset(&aesd_device,0,sizeof(struct aesd_dev));
 
     /**
-     * TODO: initialize the AESD specific portion of the device
+     * initialize the AESD specific portion of the device
      */
-
+    aesd_circular_buffer_init(&aesd_device.buffer);
+    mutex_init(&aesd_device.lock); 
     result = aesd_setup_cdev(&aesd_device);
 
-    if( result ) {
+    if (result)
         unregister_chrdev_region(dev, 1);
-    }
     return result;
-
 }
+
 
 void aesd_cleanup_module(void)
 {
@@ -122,12 +348,17 @@ void aesd_cleanup_module(void)
     cdev_del(&aesd_device.cdev);
 
     /**
-     * TODO: cleanup AESD specific poritions here as necessary
+     * cleanup AESD specific poritions here as necessary
      */
-
+    size_t index;
+    struct aesd_buffer_entry *entry;
+    AESD_CIRCULAR_BUFFER_FOREACH(entry, &aesd_device.buffer, index) 
+    {
+        kfree(entry->buffptr);
+    }
+    mutex_destroy(&aesd_device.lock);
     unregister_chrdev_region(devno, 1);
 }
-
 
 
 module_init(aesd_init_module);
