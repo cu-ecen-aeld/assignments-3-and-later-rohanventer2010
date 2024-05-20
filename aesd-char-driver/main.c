@@ -21,6 +21,8 @@
 #include <linux/uaccess.h> // For copy_from_user()
 
 #include "aesdchar.h"
+#include "aesd_ioctl.h"
+
 int aesd_major =   0; // use dynamic major
 int aesd_minor =   0;
 
@@ -339,6 +341,72 @@ loff_t aesd_llseek(struct file *filp, loff_t offset, int whence)
 }
 
 
+static long aesd_unlocked_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) 
+{
+    struct aesd_dev *dev;
+
+    PDEBUG("ioctl cmd %ud, arg: %lu", cmd, arg);
+
+    if (_IOC_TYPE(cmd) != AESD_IOC_MAGIC)
+        return -ENOTTY;  /* Inappropriate ioctl for device */
+
+    if (_IOC_NR(cmd) > AESDCHAR_IOC_MAXNR)
+        return -ENOTTY;  /* Inappropriate ioctl for device */
+
+    
+    if (cmd != AESDCHAR_IOCSEEKTO)
+        return -EINVAL;  /* Inappropriate ioctl for device */
+
+    /* continue as cmd == AESDCHAR_IOCSEEKTO */
+
+    dev = (struct aesd_dev*)filp->private_data;
+
+
+    struct aesd_seekto seekto;
+    size_t copied_bytes = copy_from_user (&seekto, (struct aesd_seekto *)arg, sizeof(struct aesd_seekto));
+    /* number of bytes that could not be copied */
+    if (copied_bytes != 0)
+        return -EINVAL;
+
+    if(mutex_lock_interruptible(&dev->lock))
+        return -ERESTARTSYS; /* return ERESTARTSYS (Interrupted system call should be restarted) */
+
+    /* get current size of the FIFO, and calculate new offset */
+    loff_t new_fpos = 0;
+    loff_t eof = 0;
+    uint8_t index;
+    struct aesd_circular_buffer *buffer_ = &dev->buffer;
+    struct aesd_buffer_entry *entry_;
+    AESD_CIRCULAR_BUFFER_FOREACH(entry_, buffer_, index) 
+    {
+        eof += entry_->size;
+        if (index < seekto.write_cmd)
+            new_fpos += entry_->size;
+    }
+    
+    mutex_unlock(&dev->lock);
+    
+    // Calculate the new file position
+//    uint8_t ii = 0;
+//    for (ii = 0; i < seekto.write_cmd; ii++)
+//        new_fpos += buffer_.entry[ii % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED].size; // Should we wrap around?
+
+    //TODO: should we check if this offset is less than the size of the command?
+
+    /* Validate the new file position against total length */
+    if (new_fpos >= eof)
+        return -EINVAL;
+
+    new_fpos += seekto.write_cmd_offset;
+    filp->f_pos = new_fpos;
+
+    /* unlock the mutex*/
+    
+
+    return 0;
+}
+
+
 struct file_operations aesd_fops = {
     .owner =    THIS_MODULE,
     .read =     aesd_read,
@@ -346,6 +414,7 @@ struct file_operations aesd_fops = {
     .open =     aesd_open,
     .release =  aesd_release,
     .llseek =   aesd_llseek,
+    .unlocked_ioctl = aesd_unlocked_ioctl,
 };
 
 
