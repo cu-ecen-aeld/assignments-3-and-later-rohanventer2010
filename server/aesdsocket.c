@@ -384,6 +384,31 @@ void* socket_thread_func(void* thread_param)
 
   while(1)
   {
+    int ret;
+    ret = pthread_mutex_lock(thread_func_args->mutex);
+    if (ret != 0)
+    {
+      syslog(LOG_ERR, "Error acquiring mutex");
+      if (thread_func_args->accepted_fd >= 0)
+        close(thread_func_args->accepted_fd);      
+      thread_func_args->thread_completed = true;
+      thread_func_args->thread_generated_error = true;    
+      return thread_param;
+    }
+
+    /* open the file */
+    tempfile_fd = open(TEMP_FILE, O_CREAT | O_APPEND | O_WRONLY, 0666);
+    if (tempfile_fd < 0)
+    {
+      syslog(LOG_ERR, "Could not open temp file %s", TEMP_FILE);
+      if (thread_func_args->accepted_fd >= 0)
+        close(thread_func_args->accepted_fd);      
+      thread_func_args->thread_completed = true;
+      thread_func_args->thread_generated_error = true;
+      pthread_mutex_unlock(thread_func_args->mutex);
+      return thread_param;
+    }
+
     while (1)
     {
       bytes_received = recv(thread_func_args->accepted_fd, recv_buffer, sizeof(recv_buffer), 0);
@@ -400,30 +425,30 @@ void* socket_thread_func(void* thread_param)
       if (bytes_received == 0)
         break; /* connection closed by peer */
 
-      int ret;
-      ret = pthread_mutex_lock(thread_func_args->mutex);
-      if (ret != 0)
-      {
-        syslog(LOG_ERR, "Error acquiring mutex");
-        if (thread_func_args->accepted_fd >= 0)
-          close(thread_func_args->accepted_fd);      
-        thread_func_args->thread_completed = true;
-        thread_func_args->thread_generated_error = true;    
-        return thread_param;
-      }
+      // int ret;
+      // ret = pthread_mutex_lock(thread_func_args->mutex);
+      // if (ret != 0)
+      // {
+      //   syslog(LOG_ERR, "Error acquiring mutex");
+      //   if (thread_func_args->accepted_fd >= 0)
+      //     close(thread_func_args->accepted_fd);      
+      //   thread_func_args->thread_completed = true;
+      //   thread_func_args->thread_generated_error = true;    
+      //   return thread_param;
+      // }
 
-      /* open the file */
-      tempfile_fd = open(TEMP_FILE, O_CREAT | O_APPEND | O_WRONLY, 0666);
-      if (tempfile_fd < 0)
-      {
-        syslog(LOG_ERR, "Could not open temp file %s", TEMP_FILE);
-        if (thread_func_args->accepted_fd >= 0)
-          close(thread_func_args->accepted_fd);      
-        thread_func_args->thread_completed = true;
-        thread_func_args->thread_generated_error = true;
-        pthread_mutex_unlock(thread_func_args->mutex);
-        return thread_param;
-      }
+      // /* open the file */
+      // tempfile_fd = open(TEMP_FILE, O_CREAT | O_APPEND | O_WRONLY, 0666);
+      // if (tempfile_fd < 0)
+      // {
+      //   syslog(LOG_ERR, "Could not open temp file %s", TEMP_FILE);
+      //   if (thread_func_args->accepted_fd >= 0)
+      //     close(thread_func_args->accepted_fd);      
+      //   thread_func_args->thread_completed = true;
+      //   thread_func_args->thread_generated_error = true;
+      //   pthread_mutex_unlock(thread_func_args->mutex);
+      //   return thread_param;
+      // }
 
       /* string sent over the socket equals AESDCHAR_IOCSEEKTO:X,Y 
        * where X and Y are unsigned decimal integer values, 
@@ -452,7 +477,7 @@ void* socket_thread_func(void* thread_param)
           pthread_mutex_unlock(thread_func_args->mutex);
           return thread_param;
         }
-        close(tempfile_fd);
+        //close(tempfile_fd);
         break;
       }
       else
@@ -498,7 +523,7 @@ void* socket_thread_func(void* thread_param)
             pthread_mutex_unlock(thread_func_args->mutex);      
             return thread_param;
           }
-          close(tempfile_fd);        
+          //close(tempfile_fd);        
         }
         else
         {
@@ -514,7 +539,7 @@ void* socket_thread_func(void* thread_param)
             pthread_mutex_unlock(thread_func_args->mutex);
             return thread_param;
           }
-          close(tempfile_fd);
+          //close(tempfile_fd);
           break; 
         }
       }
@@ -529,23 +554,24 @@ void* socket_thread_func(void* thread_param)
       thread_func_args->thread_completed = true;
       thread_func_args->thread_generated_error = false;
       pthread_mutex_unlock(thread_func_args->mutex);
+      close(tempfile_fd);
       return thread_param;
     }
     else
     {
       /* open the temp file again and read all data and send back to remote peer */
       printf("Read from circular buffer");
-      tempfile_fd = open(TEMP_FILE, O_RDONLY);
-      if (tempfile_fd < 0)
-      {
-        syslog(LOG_ERR, "Could not open temp file %s", TEMP_FILE);
-        if (thread_func_args->accepted_fd >= 0)
-          close(thread_func_args->accepted_fd);
-        thread_func_args->thread_completed = true;
-        thread_func_args->thread_generated_error = true;
-        pthread_mutex_unlock(thread_func_args->mutex);
-        return thread_param;
-      }   
+      // tempfile_fd = open(TEMP_FILE, O_RDONLY);
+      // if (tempfile_fd < 0)
+      // {
+      //   syslog(LOG_ERR, "Could not open temp file %s", TEMP_FILE);
+      //   if (thread_func_args->accepted_fd >= 0)
+      //     close(thread_func_args->accepted_fd);
+      //   thread_func_args->thread_completed = true;
+      //   thread_func_args->thread_generated_error = true;
+      //   pthread_mutex_unlock(thread_func_args->mutex);
+      //   return thread_param;
+      // }   
 
       char file_buffer[1024];
       ssize_t bytes_read = 0;
