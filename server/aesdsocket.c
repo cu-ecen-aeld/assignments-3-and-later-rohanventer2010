@@ -442,7 +442,17 @@ void* socket_thread_func(void* thread_param)
         seekto.write_cmd = write_cmd;
         seekto.write_cmd_offset = write_cmd_offset;
         ret = ioctl(tempfile_fd, AESDCHAR_IOCSEEKTO, &seekto);
-        syslog(LOG_DEBUG, "ioctl returned: %d\n", ret);
+        if (ret != 0)
+        {
+          syslog(LOG_ERR, "Could not ioctl, write_cmd: %u, write_cmd_offset: %u", write_cmd, write_cmd_offset);
+          if (thread_func_args->accepted_fd >= 0)
+            close(thread_func_args->accepted_fd);      
+          thread_func_args->thread_completed = true;
+          thread_func_args->thread_generated_error = true;
+          pthread_mutex_unlock(thread_func_args->mutex);
+          return thread_param;
+        }
+        close(tempfile_fd);
       }
       else
 #endif      
