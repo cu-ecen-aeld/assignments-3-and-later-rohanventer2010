@@ -643,8 +643,6 @@ void* timer_thread_func(void* thread_param)
       close(tempfile_fd);
       pthread_mutex_unlock(thread_func_args->mutex);
     }
-
   }
-
 }
 
