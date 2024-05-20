@@ -395,7 +395,7 @@ void* socket_thread_func(void* thread_param)
     }
 
     /* open the file */
-    tempfile_fd = open(TEMP_FILE, O_CREAT | O_APPEND | O_WRONLY, 0666);
+    tempfile_fd = open(TEMP_FILE, O_CREAT | O_APPEND | O_RDWR, 0666);
     if (tempfile_fd < 0)
     {
       syslog(LOG_ERR, "Could not open temp file %s", TEMP_FILE);
