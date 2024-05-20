@@ -26,3 +26,6 @@ echo "write10" > ${device}
 
 read_with_seek 2 ${device} ${read_file}
 cat ${read_file}
+
+# remove the temp file
+rm ${read_file}
