@@ -382,8 +382,6 @@ void* socket_thread_func(void* thread_param)
 
   pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
 
-  while(1)
-  {
     int ret;
     ret = pthread_mutex_lock(thread_func_args->mutex);
     if (ret != 0)
@@ -409,6 +407,8 @@ void* socket_thread_func(void* thread_param)
       return thread_param;
     }
 
+  while(1)
+  {
     while (1)
     {
       bytes_received = recv(thread_func_args->accepted_fd, recv_buffer, sizeof(recv_buffer), 0);
@@ -560,7 +560,7 @@ void* socket_thread_func(void* thread_param)
     else
     {
       /* open the temp file again and read all data and send back to remote peer */
-      printf("Read from circular buffer");
+      printf("Read from circular buffer\n");
       // tempfile_fd = open(TEMP_FILE, O_RDONLY);
       // if (tempfile_fd < 0)
       // {
