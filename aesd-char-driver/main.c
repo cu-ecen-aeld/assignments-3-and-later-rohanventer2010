@@ -345,7 +345,7 @@ static long aesd_unlocked_ioctl(struct file *filp, unsigned int cmd, unsigned lo
 {
     struct aesd_dev *dev;
 
-    PDEBUG("ioctl cmd %ud, arg: %lu", cmd, arg);
+    PDEBUG("ioctl cmd %u, arg: %lu", cmd, arg);
 
     if (_IOC_TYPE(cmd) != AESD_IOC_MAGIC)
         return -ENOTTY;  /* Inappropriate ioctl for device */
@@ -397,7 +397,7 @@ static long aesd_unlocked_ioctl(struct file *filp, unsigned int cmd, unsigned lo
 
     new_fpos += seekto.write_cmd_offset;
     filp->f_pos = new_fpos;
-
+    PDEBUG("ioctl new_fpos %lu", new_fpos);
     /* unlock the mutex*/
     
     return 0;
