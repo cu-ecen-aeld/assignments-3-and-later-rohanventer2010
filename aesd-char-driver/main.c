@@ -54,6 +54,7 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count, loff_t *f_p
     ssize_t retval = 0;
 
     PDEBUG("read %zu bytes with offset %lld", count, *f_pos);
+    PDEBUG("filp->f_pos %lld", filp->f_pos);
 
     /* make sure arguments are valid 
      * return EFAULT (Bad address)
@@ -275,7 +276,8 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff
     struct aesd_circular_buffer *buffer_ = &dev->buffer;
     struct aesd_buffer_entry *entry_;
     PDEBUG("======");
-    AESD_CIRCULAR_BUFFER_FOREACH(entry_,buffer_,index) {
+    AESD_CIRCULAR_BUFFER_FOREACH(entry_, buffer_, index) 
+    {
         char new_string[entry_->size+1];
         memcpy(new_string, entry_->buffptr, entry_->size);
         new_string[entry_->size] = '\0'; //properly null terminate
@@ -283,10 +285,57 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff
     }
     PDEBUG("======");
 
-
     kfree(temp_buffer);
     mutex_unlock(&dev->lock);
     return retval; /* return number of bytes written */
+}
+
+
+loff_t aesd_llseek(struct file *filp, loff_t offset, int whence) 
+{
+    struct aesd_dev *dev;
+
+    PDEBUG("whence: %d offset: %lld", whence, offset);
+
+    /* make sure arguments are valid 
+     * return EFAULT (Bad address)
+     */
+    if (!filp)
+        return -EFAULT;    
+
+    dev = (struct aesd_dev*)filp->private_data;
+
+    /* since we support wrapping around in reading from the FIFO we can define the maxsize as 
+     * the maximum file size the FS supports
+     * If we want to be more restrictive, set maxsize to the size of the FIFO (circular buffer) */
+    loff_t maxsize = MAX_LFS_FILESIZE;
+
+    if(mutex_lock_interruptible(&dev->lock))
+        return -ERESTARTSYS; /* return ERESTARTSYS (Interrupted system call should be restarted) */
+
+    /* get current size of the FIFO */
+    loff_t eof = 0;
+    uint8_t index;
+    struct aesd_circular_buffer *buffer_ = &dev->buffer;
+    struct aesd_buffer_entry *entry_;
+    AESD_CIRCULAR_BUFFER_FOREACH(entry_, buffer_, index) 
+    {
+        eof += entry_->size;
+    }
+    /* only lock the relevant data */
+    mutex_unlock(&dev->lock);
+
+    switch(whence) 
+    {
+        case SEEK_SET: /* fall through */
+        case SEEK_CUR: /* fall through */
+        case SEEK_END:
+            /* loff_t generic_file_llseek_size(struct file *file, loff_t offset, int whence, loff_t maxsize, loff_t eof) */
+            return generic_file_llseek_size(filp, offset, whence, maxsize, eof);
+        default:
+            return -EINVAL;
+            break;
+    }
 }
 
 
@@ -296,6 +345,7 @@ struct file_operations aesd_fops = {
     .write =    aesd_write,
     .open =     aesd_open,
     .release =  aesd_release,
+    .llseek =   aesd_llseek,
 };
 
 
