@@ -358,9 +358,7 @@ static long aesd_unlocked_ioctl(struct file *filp, unsigned int cmd, unsigned lo
         return -EINVAL;  /* Inappropriate ioctl for device */
 
     /* continue as cmd == AESDCHAR_IOCSEEKTO */
-
     dev = (struct aesd_dev*)filp->private_data;
-
 
     struct aesd_seekto seekto;
     size_t copied_bytes = copy_from_user (&seekto, (struct aesd_seekto *)arg, sizeof(struct aesd_seekto));
@@ -402,7 +400,6 @@ static long aesd_unlocked_ioctl(struct file *filp, unsigned int cmd, unsigned lo
 
     /* unlock the mutex*/
     
-
     return 0;
 }
 

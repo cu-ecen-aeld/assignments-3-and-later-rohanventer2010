@@ -17,6 +17,7 @@
 
 #include "threading.h"
 #include "queue.h"
+#include "aesd_ioctl.h"
 
 /* function prototypes */
 void signal_handler(int);
@@ -411,7 +412,7 @@ void* socket_thread_func(void* thread_param)
         return thread_param;
       }
 
-      /* write data to the temp file and then close */
+      /* open the file */
       tempfile_fd = open(TEMP_FILE, O_CREAT | O_APPEND | O_WRONLY, 0666);
       if (tempfile_fd < 0)
       {
@@ -424,40 +425,87 @@ void* socket_thread_func(void* thread_param)
         return thread_param;
       }
 
-      /* find position in '\n' if any*/
-      int pos = find_chr_in_str((const char *)recv_buffer, bytes_received, '\n');
-      if (pos < 0)
+      /* string sent over the socket equals AESDCHAR_IOCSEEKTO:X,Y 
+       * where X and Y are unsigned decimal integer values, 
+       * the X should be considered the write command to seek into and 
+       * the Y should be considered the offset within the write command */
+#ifdef USE_AESD_CHAR_DEVICE      
+      uint32_t write_cmd;
+      uint32_t write_cmd_offset;
+      struct aesd_seekto seekto = {
+        .write_cmd = 0,
+        .write_cmd_offset = 0
+      };
+      ret = sscanf(recv_buffer, "AESDCHAR_IOCSEEKTO:%u,%u\n", &write_cmd, &write_cmd_offset);
+      if (ret == 2) /* we need to get 2 parameters */
       {
-        /* '\n' was not found, write entire buffer */
-        ret = write(tempfile_fd, recv_buffer, bytes_received);
-        if (ret < 0)
-        {
-          syslog(LOG_ERR, "Could not write to temp file %s, '\\n' was not found", TEMP_FILE);
-          if (thread_func_args->accepted_fd >= 0)
-            close(thread_func_args->accepted_fd);        
-          thread_func_args->thread_completed = true;
-          thread_func_args->thread_generated_error = true;
-          pthread_mutex_unlock(thread_func_args->mutex);      
-          return thread_param;
-        }
-        close(tempfile_fd);        
+        seekto.write_cmd = write_cmd;
+        seekto.write_cmd_offset = write_cmd_offset;
+        ret = ioctl(tempfile_fd, AESDCHAR_IOCSEEKTO, &seekto);
+        syslog(LOG_DEBUG, "ioctl returned: %d\n", ret);
       }
       else
+#endif      
       {
-        /* '\n' was found, write only upto returned position */
-        ret = write(tempfile_fd, recv_buffer, pos+1);
-        if (ret < 0)
+        // ret = pthread_mutex_lock(thread_func_args->mutex);
+        // if (ret != 0)
+        // {
+        //   syslog(LOG_ERR, "Error acquiring mutex");
+        //   if (thread_func_args->accepted_fd >= 0)
+        //     close(thread_func_args->accepted_fd);      
+        //   thread_func_args->thread_completed = true;
+        //   thread_func_args->thread_generated_error = true;    
+        //   return thread_param;
+        // }
+
+        /* write data to the temp file and then close */
+        // tempfile_fd = open(TEMP_FILE, O_CREAT | O_APPEND | O_WRONLY, 0666);
+        // if (tempfile_fd < 0)
+        // {
+        //   syslog(LOG_ERR, "Could not open temp file %s", TEMP_FILE);
+        //   if (thread_func_args->accepted_fd >= 0)
+        //     close(thread_func_args->accepted_fd);      
+        //   thread_func_args->thread_completed = true;
+        //   thread_func_args->thread_generated_error = true;
+        //   pthread_mutex_unlock(thread_func_args->mutex);
+        //   return thread_param;
+        // }
+
+        /* find position in '\n' if any*/
+        int pos = find_chr_in_str((const char *)recv_buffer, bytes_received, '\n');
+        if (pos < 0)
         {
-          syslog(LOG_ERR, "Could not write to temp file %s, '\\n' was found", TEMP_FILE);
-          if (thread_func_args->accepted_fd >= 0)
-            close(thread_func_args->accepted_fd);        
-          thread_func_args->thread_completed = true;
-          thread_func_args->thread_generated_error = true;
-          pthread_mutex_unlock(thread_func_args->mutex);
-          return thread_param;
+          /* '\n' was not found, write entire buffer */
+          ret = write(tempfile_fd, recv_buffer, bytes_received);
+          if (ret < 0)
+          {
+            syslog(LOG_ERR, "Could not write to temp file %s, '\\n' was not found", TEMP_FILE);
+            if (thread_func_args->accepted_fd >= 0)
+              close(thread_func_args->accepted_fd);        
+            thread_func_args->thread_completed = true;
+            thread_func_args->thread_generated_error = true;
+            pthread_mutex_unlock(thread_func_args->mutex);      
+            return thread_param;
+          }
+          close(tempfile_fd);        
         }
-        close(tempfile_fd);
-        break; 
+        else
+        {
+          /* '\n' was found, write only upto returned position */
+          ret = write(tempfile_fd, recv_buffer, pos+1);
+          if (ret < 0)
+          {
+            syslog(LOG_ERR, "Could not write to temp file %s, '\\n' was found", TEMP_FILE);
+            if (thread_func_args->accepted_fd >= 0)
+              close(thread_func_args->accepted_fd);        
+            thread_func_args->thread_completed = true;
+            thread_func_args->thread_generated_error = true;
+            pthread_mutex_unlock(thread_func_args->mutex);
+            return thread_param;
+          }
+          close(tempfile_fd);
+          break; 
+        }
       }
     }
 
