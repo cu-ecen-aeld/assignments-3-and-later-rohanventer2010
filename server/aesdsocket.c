@@ -453,6 +453,7 @@ void* socket_thread_func(void* thread_param)
           return thread_param;
         }
         close(tempfile_fd);
+        break;
       }
       else
 #endif      
@@ -533,6 +534,7 @@ void* socket_thread_func(void* thread_param)
     else
     {
       /* open the temp file again and read all data and send back to remote peer */
+      printf("Read from circular buffer");
       tempfile_fd = open(TEMP_FILE, O_RDONLY);
       if (tempfile_fd < 0)
       {
